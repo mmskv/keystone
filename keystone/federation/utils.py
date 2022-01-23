@@ -16,6 +16,7 @@ import ast
 import re
 
 import flask
+import requests
 import jsonschema
 from oslo_config import cfg
 from oslo_log import log
@@ -126,6 +127,7 @@ MAPPING_SCHEMA = {
                             "type": "object",
                             "oneOf": [
                                 {"$ref": "#/definitions/empty"},
+                                {"$ref": "#/definitions/custom"},
                                 {"$ref": "#/definitions/any_one_of"},
                                 {"$ref": "#/definitions/not_any_of"},
                                 {"$ref": "#/definitions/blacklist"},
@@ -145,6 +147,22 @@ MAPPING_SCHEMA = {
                 "type": {
                     "type": "string"
                 },
+            },
+            "additionalProperties": False,
+        },
+        "custom": {
+            "type": "object",
+            "required": ['type', 'user_endpoint', 'projects_endpoint'],
+            "properties": {
+                "type": {
+                    "type": "string"
+                },
+                "user_endpoint": {
+                    "type": "string"
+                },
+                "projects_endpoint": {
+                    "type":"string"
+                }
             },
             "additionalProperties": False,
         },
@@ -811,11 +829,40 @@ class RuleProcessor(object):
         :rtype: keystone.federation.utils.DirectMaps or None
 
         """
+        def get_user_from_remote(user_endpoint, assertion):
+            email = assertion.get('HTTP_OIDC_EMAIL')
+            url = user_endpoint.format(email)
+            return requests.get(url).json().get('data')
+
+        def get_projects_from_remote(projects_endpoint, userid):
+            url = projects_endpoint.format(userid)
+            return requests.get(url).json().get('data')
+
+        def get_user_projects(user_endpoint, projects_endpoint, assertion):
+            user = get_user_from_remote(user_endpoint, assertion)
+            userid = user.get('userId')
+
+            projects = get_projects_from_remote(projects_endpoint, userid)
+            projects_names = [p.get('projectNumber') for p in projects]
+            return projects_names
+
         direct_maps = DirectMaps()
 
         for requirement in requirements:
             requirement_type = requirement['type']
-            direct_map_values = assertion.get(requirement_type)
+
+            if requirement_type == "GET_REMOTE_PROJECTS":
+                try:
+                    direct_map_values = get_user_projects(
+                        requirement['user_endpoint'],
+                        requirement['projects_endpoint'], assertion)
+                except:
+                    LOG.error('Could not get user projects with assertion %s',
+                              str(assertion))
+                    return None
+            else:
+                direct_map_values = assertion.get(requirement_type)
+
             regex = requirement.get('regex', False)
 
             if not direct_map_values:
